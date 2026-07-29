@@ -1,19 +1,21 @@
 """Unit tests for backend module."""
 
+import inspect
 import os
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from deep_agent.src.infrastructure.backend import (
+    _STORE_NAMESPACE_FACTORIES,
+    _backend_accepts_runtime,
     _base_python,
     _build_env,
     _get_assistant_id_from_config,
+    _get_user_id_from_runtime,
+    _make_state_backend,
+    _make_store_backend,
     _safe_namespace_assistant,
     _safe_namespace_org,
     _safe_namespace_user,
-    _STORE_NAMESPACE_FACTORIES,
 )
 
 
@@ -153,6 +155,53 @@ class TestSafeNamespaceUser:
         ctx = _make_ctx(server_info=None, config=None)
         assert _safe_namespace_user(ctx) == ("default",)
 
+    def test_appends_metadata_user_id_when_no_server_info(self):
+        ctx = _make_ctx(
+            server_info=None,
+            config={"metadata": {"assistant_id": "cfg-agent", "user_id": "johnwick"}},
+        )
+        assert _safe_namespace_user(ctx) == ("cfg-agent", "johnwick")
+
+    def test_appends_configurable_user_id_when_no_server_info(self):
+        ctx = _make_ctx(
+            server_info=None,
+            config={"configurable": {"user_id": "johnwick"}},
+        )
+        assert _safe_namespace_user(ctx) == ("default", "johnwick")
+
+    def test_prefers_server_info_identity_over_metadata_user_id(self):
+        si = _make_server_info(assistant_id="asst-1", user_identity="jwt-sub")
+        ctx = _make_ctx(
+            server_info=si,
+            config={"metadata": {"user_id": "johnwick"}},
+        )
+        assert _safe_namespace_user(ctx) == ("asst-1", "jwt-sub")
+
+    def test_uses_metadata_user_id_when_server_info_has_no_user(self):
+        si = _make_server_info(assistant_id="asst-1", user_identity="")
+        ctx = _make_ctx(
+            server_info=si,
+            config={"metadata": {"user_id": "johnwick"}},
+        )
+        assert _safe_namespace_user(ctx) == ("asst-1", "johnwick")
+
+
+class TestGetUserIdFromRuntime:
+    def test_reads_metadata(self):
+        runtime = MagicMock()
+        runtime.config = {"metadata": {"user_id": "alice"}}
+        assert _get_user_id_from_runtime(runtime) == "alice"
+
+    def test_reads_configurable(self):
+        runtime = MagicMock()
+        runtime.config = {"configurable": {"user_id": "bob"}}
+        assert _get_user_id_from_runtime(runtime) == "bob"
+
+    def test_returns_none_when_missing(self):
+        runtime = MagicMock()
+        runtime.config = {"metadata": {"trace_id": "t1"}}
+        assert _get_user_id_from_runtime(runtime) is None
+
 
 class TestSafeNamespaceAssistant:
     """Tests for _safe_namespace_assistant."""
@@ -206,3 +255,29 @@ class TestStoreNamespaceFactories:
 
     def test_org_maps_to_safe_namespace_org(self):
         assert _STORE_NAMESPACE_FACTORIES["org"] is _safe_namespace_org
+
+
+class TestBackendConstructorHelpers:
+    """StateBackend/StoreBackend construction across deepagents versions."""
+
+    def test_make_state_backend_returns_instance(self):
+        assert _make_state_backend(MagicMock()) is not None
+
+    def test_make_store_backend_returns_instance(self):
+        def fake_namespace(ctx: object) -> tuple[str, ...]:
+            return ("test",)
+
+        assert _make_store_backend(MagicMock(), fake_namespace) is not None
+
+    def test_accepts_runtime_matches_constructor(self):
+        from deepagents.backends.state import StateBackend
+
+        expected = "runtime" in inspect.signature(StateBackend).parameters
+        assert _backend_accepts_runtime(StateBackend) is expected
+
+    def test_accepts_runtime_false_without_runtime_param(self):
+        class NoRuntime:
+            def __init__(self) -> None:
+                pass
+
+        assert _backend_accepts_runtime(NoRuntime) is False
